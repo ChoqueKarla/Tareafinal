@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# instalar-servidor-solucion.sh
+# Este script instala y configura OpenSSH, Apache, MariaDB, PHP y ajusta el firewall.
+
+set -euo pipefail
+
+# Comprobamos si tenemos privilegios de sudo
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Este script debe ejecutarse como root o con sudo."
+    exit 1
+fi
+
+# Verificar si OpenSSH está instalado, si no, instalarlo
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "=== INSTALANDO OPENSSH ==="
+    sudo apt-get update -y
+    sudo apt-get install -y openssh-server
+    sudo systemctl enable --now ssh
+    echo "OpenSSH instalado y habilitado."
+else
+    echo "OpenSSH ya está instalado."
+    sudo systemctl restart ssh
+    sudo systemctl enable --now ssh
+fi
+
+# Comprobamos el estado del servicio SSH
+if ! sudo systemctl is-active --quiet ssh; then
+    echo "ERROR: El servicio SSH no está activo, iniciando..."
+    sudo systemctl start ssh
+    sudo systemctl enable ssh
+fi
+
+# Actualización del sistema
+echo "=== ACTUALIZANDO SISTEMA ==="
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo apt-get dist-upgrade -y
+sudo apt-get autoremove -y
+sudo apt-get clean
+
+# Instalación de dependencias básicas
+echo "=== INSTALANDO DEPENDENCIAS BÁSICAS ==="
+sudo apt-get install -y software-properties-common ca-certificates lsb-release apt-transport-https curl gnupg
+
+# Agregar repositorio PHP (si se puede)
+echo "=== AGREGANDO REPOSITORIO PHP ==="
+if ! sudo add-apt-repository -y ppa:ondrej/php; then
+    echo "⚠️ No se pudo añadir el PPA ondrej/php. Verifica si el PPA está disponible para tu versión de Ubuntu."
+    echo "Continuando con el script sin PPA..."
+fi
+sudo apt-get update -y
+
+PHP_VERSION="8.4"
+
+# Instalar Apache, PHP y MariaDB
+echo "=== INSTALANDO APACHE, PHP Y MARIADB ==="
+sudo apt-get install -y apache2 mariadb-server mariadb-client \
+    "php${PHP_VERSION}" "libapache2-mod-php${PHP_VERSION}" \
+    "php${PHP_VERSION}-fpm" "php${PHP_VERSION}-mysqli" \
+    "php${PHP_VERSION}-xml" "php${PHP_VERSION}-mbstring" \
+    "php${PHP_VERSION}-curl" "php${PHP_VERSION}-zip" "php${PHP_VERSION}-gd" || {
+    echo "⚠️ No se pudo instalar PHP ${PHP_VERSION}, instalando versión disponible..."
+    sudo apt-get install -y php libapache2-mod-php php-mysql php-xml php-mbstring php-curl php-zip php-gd
+}
+
+# Habilitar servicios
+echo "=== HABILITANDO SERVICIOS ==="
+sudo systemctl enable --now apache2
+sudo systemctl enable --now mariadb || true
+if command -v php${PHP_VERSION}-fpm >/dev/null 2>&1; then
+    sudo systemctl enable --now php${PHP_VERSION}-fpm || true
+fi
+
+# Comprobamos que Apache y MariaDB estén corriendo
+if ! sudo systemctl is-active --quiet apache2; then
+    echo "ERROR: Apache no está corriendo, iniciando..."
+    sudo systemctl start apache2
+    sudo systemctl enable apache2
+fi
+
+if ! sudo systemctl is-active --quiet mariadb; then
+    echo "ERROR: MariaDB no está corriendo, iniciando..."
+    sudo systemctl start mariadb
+    sudo systemctl enable mariadb
+fi
+
+# Crear usuarios del sistema
+echo "=== CREANDO USUARIOS DEL SISTEMA ==="
+for u in noelia jaime; do
+    if id "$u" >/dev/null 2>&1; then
+        echo "Usuario $u ya existe, saltando."
+    else
+        sudo useradd -m -s /bin/bash "$u"
+        echo "${u}:${u}" | sudo chpasswd
+        echo "Usuario $u creado con contraseña '$u'"
+    fi
+done
+
+# Configuración de firewall (UFW)
+echo "=== CONFIGURANDO FIREWALL (UFW) ==="
+if ! command -v ufw >/dev/null 2>&1; then
+    echo "UFW no está instalado. Instalando..."
+    sudo apt-get install -y ufw
+fi
+
+# Permitir SSH y Apache en el firewall
+sudo ufw allow OpenSSH
+sudo ufw allow 'Apache Full'
+sudo ufw --force enable
+
+# Comprobamos que UFW esté habilitado
+if ! sudo ufw status | grep -q "active"; then
+    echo "ERROR: El firewall UFW no está habilitado. Habilitándolo..."
+    sudo ufw --force enable
+fi
+
+# Crear página de prueba PHP
+echo "=== CREANDO PÁGINA DE PRUEBA PHP ==="
+echo "<?php phpinfo(); ?>" | sudo tee /var/www/html/info.php >/dev/null
+sudo chown -R www-data:www-data /var/www/html
+sudo systemctl reload apache2
+
+echo "✅ Instalación y actualización completadas correctamente."
+echo "Visita http://<tu_servidor>/info.php para probar PHP."
